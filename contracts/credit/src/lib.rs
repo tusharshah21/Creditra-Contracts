@@ -205,10 +205,33 @@ impl Credit {
         ()
     }
 
-    /// Close a credit line (admin or borrower when utilized is 0).
+    /// Close a credit line. Callable by admin (force-close) or by borrower when utilization is zero.
+    ///
+    /// # Arguments
+    /// * `closer` - Address that must have authorized this call. Must be either the contract admin
+    ///   (can close regardless of utilization) or the borrower (can close only when
+    ///   `utilized_amount` is zero).
+    ///
+    /// # Errors
+    /// * Panics if credit line does not exist, or if `closer` is not admin/borrower, or if
+    ///   borrower closes while `utilized_amount != 0`.
+    ///
     /// Emits a CreditLineClosed event.
     pub fn close_credit_line(env: Env, borrower: Address) -> () {
         let mut credit_line = load_credit_line(&env, &borrower);
+
+        if credit_line.status == CreditStatus::Closed {
+            return ();
+        }
+
+        let allowed = closer == admin || (closer == borrower && credit_line.utilized_amount == 0);
+
+        if !allowed {
+            if closer == borrower {
+                panic!("cannot close: utilized amount not zero");
+            }
+            panic!("unauthorized");
+        }
 
         credit_line.status = CreditStatus::Closed;
         save_credit_line(&env, &borrower, &credit_line);
@@ -421,7 +444,7 @@ mod test {
 
         client.init(&admin);
         client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
-        client.close_credit_line(&borrower);
+        client.close_credit_line(&borrower, &admin);
 
         // Verify status changed to Closed
         let credit_line = client.get_credit_line(&borrower).unwrap();
@@ -472,7 +495,7 @@ mod test {
         assert_eq!(credit_line.status, CreditStatus::Suspended);
 
         // Close credit line
-        client.close_credit_line(&borrower);
+        client.close_credit_line(&borrower, &admin);
         let credit_line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(credit_line.status, CreditStatus::Closed);
     }
@@ -519,6 +542,7 @@ mod test {
     #[should_panic(expected = "Credit line not found")]
     fn test_close_nonexistent_credit_line() {
         let env = Env::default();
+        env.mock_all_auths();
         let admin = Address::generate(&env);
         let borrower = Address::generate(&env);
 
@@ -526,7 +550,7 @@ mod test {
         let client = CreditClient::new(&env, &contract_id);
 
         client.init(&admin);
-        client.close_credit_line(&borrower);
+        client.close_credit_line(&borrower, &admin);
     }
 
     #[test]
