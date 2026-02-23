@@ -81,14 +81,46 @@ impl Credit {
         ()
     }
 
-    /// Draw from credit line (borrower).
-    pub fn draw_credit(_env: Env, _borrower: Address, _amount: i128) -> () {
+    /// Draw from a credit line for a specific borrower.
+    ///
+    /// Requirements:
+    /// - Only the borrower that owns the credit line can call this function.
+    /// - The provided borrower address must match the stored credit line owner.
+    pub fn draw_credit(env: Env, borrower: Address, _amount: i128) -> () {
+        let credit_line: CreditLineData = env
+            .storage()
+            .persistent()
+            .get(&borrower)
+            .expect("Credit line not found");
+
+        if credit_line.borrower != borrower {
+            panic!("Borrower mismatch for credit line");
+        }
+
+        borrower.require_auth();
+
         // TODO: check limit, update utilized_amount, transfer token to borrower
         ()
     }
 
-    /// Repay credit (borrower).
-    pub fn repay_credit(_env: Env, _borrower: Address, _amount: i128) -> () {
+    /// Repay an existing credit line for a specific borrower.
+    ///
+    /// Requirements:
+    /// - Only the borrower that owns the credit line can call this function.
+    /// - The provided borrower address must match the stored credit line owner.
+    pub fn repay_credit(env: Env, borrower: Address, _amount: i128) -> () {
+        let credit_line: CreditLineData = env
+            .storage()
+            .persistent()
+            .get(&borrower)
+            .expect("Credit line not found");
+
+        if credit_line.borrower != borrower {
+            panic!("Borrower mismatch for credit line");
+        }
+
+        borrower.require_auth();
+
         // TODO: accept token, reduce utilized_amount, accrue interest
         ()
     }
@@ -433,5 +465,73 @@ mod test {
             client.get_credit_line(&borrower).unwrap().status,
             CreditStatus::Defaulted
         );
+    }
+
+    #[test]
+    fn test_draw_credit_authorized_borrower() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+
+        client.draw_credit(&borrower, &100_i128);
+    }
+
+    #[test]
+    fn test_repay_credit_authorized_borrower() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+
+        client.repay_credit(&borrower, &100_i128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_draw_credit_unauthorized_caller_panics() {
+        let env = Env::default();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+
+        client.draw_credit(&borrower, &100_i128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_repay_credit_unauthorized_caller_panics() {
+        let env = Env::default();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+
+        client.repay_credit(&borrower, &100_i128);
     }
 }
