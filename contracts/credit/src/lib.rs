@@ -663,4 +663,139 @@ mod test {
             500
         );
     }
+
+    /// Test that draw_credit reverts when the requested amount would exceed
+    /// the available credit (credit_limit - utilized_amount).
+    #[test]
+    #[should_panic(expected = "exceeds credit limit")]
+    fn test_draw_credit_exceeds_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        // Open credit line with limit of 1000
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+
+        // Draw 600 (utilized becomes 600)
+        client.draw_credit(&borrower, &600_i128);
+        assert_eq!(
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            600
+        );
+
+        // Try to draw 500 - this should fail because:
+        // available credit = 1000 - 600 = 400
+        // requested = 500 > 400 = available
+        client.draw_credit(&borrower, &500_i128);
+    }
+
+    /// Test that draw_credit reverts when the credit line is at full utilization
+    /// (utilized_amount equals credit_limit).
+    #[test]
+    #[should_panic(expected = "exceeds credit limit")]
+    fn test_draw_credit_at_full_utilization() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        // Open credit line with limit of 1000
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+
+        // Draw exactly the full limit (1000)
+        client.draw_credit(&borrower, &1000_i128);
+        assert_eq!(
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            1000
+        );
+
+        // Try to draw any amount - this should fail because:
+        // available credit = 1000 - 1000 = 0
+        // requested amount > 0 = available
+        client.draw_credit(&borrower, &1_i128);
+    }
+
+    /// Test that draw_credit succeeds when drawing exactly up to the available credit.
+    #[test]
+    fn test_draw_credit_exact_available_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        // Open credit line with limit of 1000
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+
+        // Draw 600 first
+        client.draw_credit(&borrower, &600_i128);
+        assert_eq!(
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            600
+        );
+
+        // Draw exactly 400 more - this should succeed because:
+        // available credit = 1000 - 600 = 400
+        // requested = 400 = available
+        client.draw_credit(&borrower, &400_i128);
+        assert_eq!(
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            1000
+        );
+    }
+
+    /// Test that draw_credit reverts when amount is zero.
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_draw_credit_zero_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+
+        // Try to draw zero - should fail
+        client.draw_credit(&borrower, &0_i128);
+    }
+
+    /// Test that draw_credit reverts when amount is negative.
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_draw_credit_negative_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+
+        // Try to draw negative amount - should fail
+        client.draw_credit(&borrower, &-100_i128);
+    }
 }
