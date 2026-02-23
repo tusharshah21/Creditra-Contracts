@@ -258,6 +258,7 @@ impl Credit {
 mod test {
     use super::*;
     use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::Events as _;
 
     #[test]
     fn test_init_and_open_credit_line() {
@@ -662,5 +663,129 @@ mod test {
             client.get_credit_line(&borrower).unwrap().utilized_amount,
             500
         );
+    }
+
+    // =========================================================================
+    // Integration tests: full lifecycle flows (open → draw → repay → close)
+    // =========================================================================
+
+    /// End-to-end flow: init → open → draw × 2 → repay × 2 (stub) → admin close.
+    ///
+    /// Asserts every state transition and event count along the way.
+    /// Events are checked immediately after each emitting call (before any
+    /// subsequent contract call clears the per-invocation event buffer).
+    ///
+    /// NOTE: `repay_credit` is currently a stub that validates active state but
+    /// does not reduce `utilized_amount`. Admin force-close is therefore used at
+    /// the end. The borrower-self-close variant is covered by
+    /// `test_integration_flow_borrower_close_zero_utilized`.
+    #[test]
+    fn test_integration_flow_open_draw_repay_close() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        // --- 1. Init --------------------------------------------------------
+        client.init(&admin);
+
+        // --- 2. Open credit line --------------------------------------------
+        client.open_credit_line(&borrower, &10_000_i128, &500_u32, &75_u32);
+        // CreditLineOpened event — check BEFORE next contract call resets buffer
+        assert_eq!(env.events().all().len(), 1);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.borrower, borrower);
+        assert_eq!(cl.credit_limit, 10_000);
+        assert_eq!(cl.utilized_amount, 0);
+        assert_eq!(cl.interest_rate_bps, 500);
+        assert_eq!(cl.risk_score, 75);
+        assert_eq!(cl.status, CreditStatus::Active);
+
+        // --- 3. First draw: 3 000 -------------------------------------------
+        client.draw_credit(&borrower, &3_000_i128);
+        // draw emits no events
+        assert_eq!(env.events().all().len(), 0);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.utilized_amount, 3_000);
+        assert_eq!(cl.status, CreditStatus::Active);
+
+        // --- 4. Second draw: 2 000 (cumulative: 5 000) ----------------------
+        client.draw_credit(&borrower, &2_000_i128);
+        assert_eq!(env.events().all().len(), 0);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.utilized_amount, 5_000);
+        assert_eq!(cl.credit_limit, 10_000);
+        assert_eq!(cl.status, CreditStatus::Active);
+
+        // --- 5. Repay × 2 (stub: validates active state; utilized stays 5 000) ---
+        client.repay_credit(&borrower, &2_500_i128);
+        assert_eq!(env.events().all().len(), 0);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.status, CreditStatus::Active);
+        assert_eq!(cl.utilized_amount, 5_000); // stub — not yet reduced
+
+        client.repay_credit(&borrower, &2_500_i128);
+        assert_eq!(env.events().all().len(), 0);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.status, CreditStatus::Active);
+        assert_eq!(cl.utilized_amount, 5_000); // stub — not yet reduced
+
+        // --- 6. Admin force-close -------------------------------------------
+        client.close_credit_line(&borrower, &admin);
+        // CreditLineClosed event — check BEFORE next contract call resets buffer
+        assert_eq!(env.events().all().len(), 1);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.status, CreditStatus::Closed);
+        assert_eq!(cl.credit_limit, 10_000);
+        assert_eq!(cl.interest_rate_bps, 500);
+        assert_eq!(cl.risk_score, 75);
+    }
+
+    /// Integration variant: open → (no draw) → borrower self-closes when utilized == 0.
+    ///
+    /// Confirms a borrower may close their own line with no outstanding balance,
+    /// and that the correct state and events are recorded.
+    #[test]
+    fn test_integration_flow_borrower_close_zero_utilized() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        // --- 1. Init & Open -------------------------------------------------
+        client.init(&admin);
+        client.open_credit_line(&borrower, &5_000_i128, &300_u32, &60_u32);
+        // CreditLineOpened event — check BEFORE next contract call resets buffer
+        assert_eq!(env.events().all().len(), 1);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.status, CreditStatus::Active);
+        assert_eq!(cl.utilized_amount, 0);
+        assert_eq!(cl.credit_limit, 5_000);
+        assert_eq!(cl.interest_rate_bps, 300);
+        assert_eq!(cl.risk_score, 60);
+
+        // --- 2. Borrower closes with zero utilization -----------------------
+        client.close_credit_line(&borrower, &borrower);
+        // CreditLineClosed event — check BEFORE next contract call resets buffer
+        assert_eq!(env.events().all().len(), 1);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.status, CreditStatus::Closed);
+        assert_eq!(cl.utilized_amount, 0);
     }
 }
