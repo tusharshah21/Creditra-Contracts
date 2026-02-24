@@ -24,14 +24,6 @@
           "contract_data": {
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
             "key": {
-              "vec": [
-                {
-                  "symbol": "CREDIT_LINE"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                }
-              ]
               "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
             },
             "durability": "persistent"
@@ -45,14 +37,6 @@
                 "ext": "v0",
                 "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
                 "key": {
-                  "vec": [
-                    {
-                      "symbol": "CREDIT_LINE"
-                    },
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                    }
-                  ]
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 },
                 "durability": "persistent",
@@ -73,7 +57,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 1000
+                          "lo": 2000
                         }
                       }
                     },
@@ -82,7 +66,7 @@
                         "symbol": "interest_rate_bps"
                       },
                       "val": {
-                        "u32": 300
+                        "u32": 400
                       }
                     },
                     {
@@ -90,7 +74,7 @@
                         "symbol": "risk_score"
                       },
                       "val": {
-                        "u32": 70
+                        "u32": 75
                       }
                     },
                     {
