@@ -353,7 +353,6 @@ impl Credit {
 mod test {
     use super::*;
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::testutils::Events;
 
     #[test]
     fn test_init_and_open_credit_line() {
