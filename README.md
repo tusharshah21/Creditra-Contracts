@@ -4,14 +4,23 @@ Soroban smart contracts for the Creditra adaptive credit protocol on Stellar.
 
 ## About
 
-This repo contains the **credit** contract: it will maintain credit lines, track utilization, enforce limits, and expose methods for opening lines, drawing, repaying, and updating risk parameters. The current code is a **stub** with the correct API and data types; full logic (storage, token transfers, interest) is to be implemented.
+This repo contains the **credit** contract: it maintains credit lines, tracks utilization, enforces limits, and exposes methods for opening lines, drawing, repaying, and updating risk parameters. Draw logic includes a liquidity reserve check and token transfer flow.
 
 **Contract data model:**
 
 - `CreditStatus`: Active, Suspended, Defaulted, Closed
 - `CreditLineData`: borrower, credit_limit, utilized_amount, interest_rate_bps, risk_score, status
 
-**Methods:** `init`, `open_credit_line`, `draw_credit`, `repay_credit`, `update_risk_parameters`, `suspend_credit_line`, `close_credit_line`.
+**Methods:** `init`, `set_liquidity_token`, `set_liquidity_source`, `open_credit_line`, `draw_credit`, `repay_credit`, `update_risk_parameters`, `suspend_credit_line`, `close_credit_line`.
+
+### Liquidity reserve enforcement
+
+- `draw_credit` now checks configured liquidity token balance at the configured liquidity source before transfer.
+- If reserve balance is less than requested draw amount, the transaction reverts with: `Insufficient liquidity reserve for requested draw amount`.
+- `init` defaults liquidity source to the contract address.
+- Admin can configure:
+  - `set_liquidity_token` — token contract used for reserve and draw transfers.
+  - `set_liquidity_source` — reserve address to fund draws (contract or external source).
 
 ## Tech Stack
 
