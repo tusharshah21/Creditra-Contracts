@@ -21,14 +21,14 @@
                 {
                   "i128": {
                     "hi": 0,
-                    "lo": 5000
+                    "lo": 1000
                   }
                 },
                 {
-                  "u32": 500
+                  "u32": 300
                 },
                 {
-                  "u32": 80
+                  "u32": 70
                 }
               ]
             }
@@ -37,7 +37,6 @@
         }
       ]
     ],
-    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
@@ -45,10 +44,13 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-              "function_name": "suspend_credit_line",
+              "function_name": "close_credit_line",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
                 }
               ]
             }
@@ -57,7 +59,6 @@
         }
       ]
     ],
-    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
@@ -229,7 +230,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 5000
+                          "lo": 1000
                         }
                       }
                     },
@@ -238,7 +239,7 @@
                         "symbol": "interest_rate_bps"
                       },
                       "val": {
-                        "u32": 500
+                        "u32": 300
                       }
                     },
                     {
@@ -246,7 +247,7 @@
                         "symbol": "risk_score"
                       },
                       "val": {
-                        "u32": 80
+                        "u32": 70
                       }
                     },
                     {
