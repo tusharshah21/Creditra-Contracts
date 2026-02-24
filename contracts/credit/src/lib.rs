@@ -524,7 +524,10 @@ mod test {
         client.draw_credit(&borrower, &100);
 
         let borrower_auth_found = env.auths().iter().any(|(addr, _)| *addr == borrower);
-        assert!(borrower_auth_found, "draw_credit must require borrower authorization");
+        assert!(
+            borrower_auth_found,
+            "draw_credit must require borrower authorization"
+        );
     }
 
     /// Multiple borrowers draw independently without interfering.
@@ -563,8 +566,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, _admin) =
-            setup_contract_with_credit_line(&env, &borrower, 500, 1_000);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 500, 1_000);
 
         client.draw_credit(&borrower, &600);
     }
@@ -576,8 +578,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, _admin) =
-            setup_contract_with_credit_line(&env, &borrower, 500, 1_000);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 500, 1_000);
 
         client.draw_credit(&borrower, &400);
         client.draw_credit(&borrower, &200);
@@ -675,8 +676,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, _admin) =
-            setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
 
         let line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(line.borrower, borrower);
@@ -693,8 +693,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, _admin) =
-            setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
 
         client.suspend_credit_line(&borrower);
         assert_eq!(
@@ -709,8 +708,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, admin) =
-            setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _token, admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
 
         client.close_credit_line(&borrower, &admin);
         assert_eq!(
@@ -725,8 +723,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, _admin) =
-            setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
 
         client.default_credit_line(&borrower);
         assert_eq!(
@@ -766,8 +763,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, _admin) =
-            setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
 
         client.close_credit_line(&borrower, &borrower);
         let line = client.get_credit_line(&borrower).unwrap();
@@ -812,8 +808,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, admin) =
-            setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _token, admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
 
         client.close_credit_line(&borrower, &admin);
         client.close_credit_line(&borrower, &admin);
@@ -831,8 +826,7 @@ mod test {
 
         let borrower = Address::generate(&env);
         let other = Address::generate(&env);
-        let (client, _token, _admin) =
-            setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
 
         client.close_credit_line(&borrower, &other);
     }
@@ -890,8 +884,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, _admin) =
-            setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
 
         client.update_risk_parameters(&borrower, &2_000, &400_u32, &85_u32);
 
@@ -952,8 +945,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, _admin) =
-            setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
 
         client.update_risk_parameters(&borrower, &-1, &300_u32, &70_u32);
     }
@@ -965,8 +957,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, _admin) =
-            setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
 
         client.update_risk_parameters(&borrower, &1_000, &10_001_u32, &70_u32);
     }
@@ -978,8 +969,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, _admin) =
-            setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
 
         client.update_risk_parameters(&borrower, &1_000, &300_u32, &101_u32);
     }
@@ -990,8 +980,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, _admin) =
-            setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
 
         client.update_risk_parameters(&borrower, &1_000, &10_000_u32, &100_u32);
 
@@ -1053,8 +1042,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, _admin) =
-            setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
 
         client.repay_credit(&borrower, &0);
     }
@@ -1081,8 +1069,7 @@ mod test {
         env.mock_all_auths();
 
         let borrower = Address::generate(&env);
-        let (client, _token, admin) =
-            setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let (client, _token, admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
 
         client.close_credit_line(&borrower, &admin);
         client.repay_credit(&borrower, &100);
