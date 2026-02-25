@@ -17,8 +17,9 @@ use soroban_sdk::{
 };
 
 use events::{
-    publish_credit_line_event, publish_repayment_event, publish_risk_parameters_updated,
-    CreditLineEvent, RepaymentEvent, RiskParametersUpdatedEvent,
+    publish_credit_line_event, publish_drawn_event, publish_repayment_event,
+    publish_risk_parameters_updated, CreditLineEvent, DrawnEvent, RepaymentEvent,
+    RiskParametersUpdatedEvent,
 };
 use types::{CreditLineData, CreditStatus};
 
@@ -243,6 +244,16 @@ impl Credit {
 
         credit_line.utilized_amount = updated_utilized;
         env.storage().persistent().set(&borrower, &credit_line);
+        let timestamp = env.ledger().timestamp();
+        publish_drawn_event(
+            &env,
+            DrawnEvent {
+                borrower,
+                amount,
+                new_utilized_amount: updated_utilized,
+                timestamp,
+            },
+        );
         clear_reentrancy_guard(&env);
         ()
     }
@@ -1462,15 +1473,14 @@ mod test {
         client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
         client.draw_credit(&borrower, &500_i128);
 
-        let events_before = env.events().all().len();
+        let _ = env.events().all();
         client.repay_credit(&borrower, &200_i128);
         let events_after = env.events().all().len();
 
         let credit_line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(credit_line.utilized_amount, 300);
         assert_eq!(
-            events_after,
-            events_before + 1,
+            events_after, 1,
             "repay_credit must emit exactly one RepaymentEvent"
         );
     }
