@@ -51,9 +51,9 @@ pub enum CreditError {
     Unauthorized = 5,
 }
 
-impl Into<soroban_sdk::Error> for CreditError {
-    fn into(self) -> soroban_sdk::Error {
-        soroban_sdk::Error::from_contract_error(self as u32)
+impl From<CreditError> for soroban_sdk::Error {
+    fn from(val: CreditError) -> Self {
+        soroban_sdk::Error::from_contract_error(val as u32)
     }
 }
 
@@ -158,7 +158,7 @@ impl Credit {
     /// Draw from credit line (borrower).
     /// Reverts if credit line does not exist, is Closed, borrower has not authorized,
     /// or the provided borrower does not match the stored credit line owner.
-    pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
+    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
         set_reentrancy_guard(&env);
         borrower.require_auth();
 
@@ -537,6 +537,97 @@ mod test {
         assert_eq!(credit_line.status, CreditStatus::Defaulted);
     }
 
+    // ========== open_credit_line: duplicate borrower and invalid params (#28) ==========
+
+    /// open_credit_line must revert when the borrower already has an Active credit line.
+    #[test]
+    #[should_panic(expected = "borrower already has an active credit line")]
+    fn test_open_credit_line_duplicate_active_borrower_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+        // Second open for same borrower while Active must revert.
+        client.open_credit_line(&borrower, &2000_i128, &400_u32, &60_u32);
+    }
+
+    /// open_credit_line must revert when credit_limit is zero.
+    #[test]
+    #[should_panic(expected = "credit_limit must be greater than zero")]
+    fn test_open_credit_line_zero_limit_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &0_i128, &300_u32, &70_u32);
+    }
+
+    /// open_credit_line must revert when credit_limit is negative.
+    #[test]
+    #[should_panic(expected = "credit_limit must be greater than zero")]
+    fn test_open_credit_line_negative_limit_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &-1_i128, &300_u32, &70_u32);
+    }
+
+    /// open_credit_line must revert when interest_rate_bps exceeds 10000 (100%).
+    #[test]
+    #[should_panic(expected = "interest_rate_bps cannot exceed 10000 (100%)")]
+    fn test_open_credit_line_interest_rate_exceeds_max_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &10_001_u32, &70_u32);
+    }
+
+    /// open_credit_line must revert when risk_score exceeds 100.
+    #[test]
+    #[should_panic(expected = "risk_score must be between 0 and 100")]
+    fn test_open_credit_line_risk_score_exceeds_max_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &101_u32);
+    }
+
+    // ========== draw_credit within limit (#29) ==========
+
     #[test]
     fn test_draw_credit() {
         let env = Env::default();
@@ -550,6 +641,88 @@ mod test {
         assert_eq!(credit_data.utilized_amount, 500_i128);
 
         // Events are emitted - functionality verified through storage changes
+    }
+
+    /// draw_credit within limit: single draw updates utilized_amount correctly.
+    #[test]
+    fn test_draw_credit_single_within_limit_succeeds_and_updates_utilized() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+
+        let line_before = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line_before.utilized_amount, 0);
+
+        client.draw_credit(&borrower, &400_i128);
+
+        let line_after = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line_after.utilized_amount, 400);
+        assert_eq!(line_after.credit_limit, 1000);
+    }
+
+    /// draw_credit within limit: multiple draws accumulate utilized_amount correctly.
+    #[test]
+    fn test_draw_credit_multiple_draws_within_limit_accumulate_utilized() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+
+        client.draw_credit(&borrower, &100_i128);
+        assert_eq!(
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            100
+        );
+
+        client.draw_credit(&borrower, &250_i128);
+        assert_eq!(
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            350
+        );
+
+        client.draw_credit(&borrower, &150_i128);
+        assert_eq!(
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            500
+        );
+    }
+
+    /// draw_credit within limit: drawing exact available limit succeeds and utilized equals limit.
+    #[test]
+    fn test_draw_credit_exact_available_limit_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        let limit = 5000_i128;
+        client.open_credit_line(&borrower, &limit, &300_u32, &70_u32);
+
+        client.draw_credit(&borrower, &limit);
+
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.utilized_amount, limit);
+        assert_eq!(line.credit_limit, limit);
     }
 
     #[test]
