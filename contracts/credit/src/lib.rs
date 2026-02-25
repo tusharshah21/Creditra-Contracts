@@ -263,16 +263,11 @@ impl Credit {
     /// Close a credit line. Callable by admin (force-close) or by borrower when utilization is zero.
     ///
     /// # Arguments
-    /// * `closer` - Address that must have authorized this call. Must be either the contract admin
-    ///   (can close regardless of utilization) or the borrower (can close only when
-    ///   `utilized_amount` is zero).
+    /// * `borrower` - Address of the borrower whose credit line to close.
     ///
     /// # Errors
-    /// * Panics if credit line does not exist, or if `closer` is not admin/borrower, or if
-    ///   borrower closes while `utilized_amount != 0`.
+    /// * Panics if credit line does not exist.
     ///
-    /// Emits a CreditLineClosed event.
-    /// Close a credit line (admin or borrower when utilized is 0).
     /// Emits a CreditLineClosed event.
     pub fn close_credit_line(env: Env, borrower: Address) {
         let mut credit_line: CreditLineData = env
