@@ -1553,7 +1553,6 @@ mod test_close_utilized {
         (client, admin)
     }
 
-
     #[test]
     #[should_panic(expected = "cannot close: utilized amount not zero")]
     fn test_close_utilized_borrower_rejected_at_minimum_utilization() {
@@ -1565,7 +1564,6 @@ mod test_close_utilized {
         client.close_credit_line(&borrower, &borrower);
     }
 
-
     #[test]
     #[should_panic(expected = "cannot close: utilized amount not zero")]
     fn test_close_utilized_borrower_rejected_at_full_utilization() {
@@ -1576,7 +1574,6 @@ mod test_close_utilized {
         client.draw_credit(&borrower, &500);
         client.close_credit_line(&borrower, &borrower);
     }
-
 
     #[test]
     fn test_close_utilized_admin_force_close_preserves_utilized_amount() {
@@ -1590,7 +1587,6 @@ mod test_close_utilized {
         assert_eq!(line.status, CreditStatus::Closed);
         assert_eq!(line.utilized_amount, 750);
     }
-
 
     #[test]
     fn test_close_utilized_admin_force_close_emits_closed_event() {
@@ -1607,7 +1603,6 @@ mod test_close_utilized {
         assert_eq!(line.utilized_amount, 400);
     }
 
-
     #[test]
     #[should_panic(expected = "cannot close: utilized amount not zero")]
     fn test_close_utilized_borrower_rejected_on_suspended_line() {
@@ -1619,7 +1614,6 @@ mod test_close_utilized {
         client.suspend_credit_line(&borrower);
         client.close_credit_line(&borrower, &borrower);
     }
-
 
     #[test]
     fn test_close_utilized_admin_force_close_suspended_line() {
@@ -1634,7 +1628,6 @@ mod test_close_utilized {
         assert_eq!(line.status, CreditStatus::Closed);
         assert_eq!(line.utilized_amount, 600);
     }
-
 
     #[test]
     fn test_close_utilized_borrower_succeeds_after_full_repayment() {
@@ -1655,7 +1648,6 @@ mod test_close_utilized {
         );
     }
 
-
     #[test]
     #[should_panic(expected = "unauthorized")]
     fn test_close_utilized_third_party_rejected_with_zero_utilization() {
@@ -1666,7 +1658,6 @@ mod test_close_utilized {
         let (client, _admin) = setup(&env, &borrower, 1_000, 0);
         client.close_credit_line(&borrower, &third_party);
     }
-
 
     #[test]
     fn test_close_utilized_admin_force_close_multiple_draws() {
@@ -1686,7 +1677,6 @@ mod test_close_utilized {
         assert_eq!(line.status, CreditStatus::Closed);
         assert_eq!(line.utilized_amount, 500);
     }
-
 
     #[test]
     #[should_panic(expected = "cannot close: utilized amount not zero")]
