@@ -1167,6 +1167,23 @@ mod test {
     }
 
     #[test]
+    #[should_panic(expected = "exceeds credit limit")]
+    fn test_draw_credit_rejected_when_exceeding_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &100_i128, &300_u32, &70_u32);
+        client.draw_credit(&borrower, &101_i128);
+    }
+
+    #[test]
     #[should_panic(expected = "credit line is closed")]
     fn test_repay_credit_rejected_when_closed() {
         let env = Env::default();
@@ -1632,6 +1649,89 @@ mod test {
             client.get_credit_line(&borrower).unwrap().utilized_amount,
             200_i128
         );
+    }
+
+    #[test]
+    fn test_set_liquidity_source_updates_instance_storage() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let reserve = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.set_liquidity_source(&reserve);
+
+        let stored: Address = env
+            .as_contract(&contract_id, || {
+                env.storage().instance().get(&DataKey::LiquiditySource)
+            })
+            .unwrap();
+        assert_eq!(stored, reserve);
+    }
+
+    #[test]
+    fn test_draw_credit_uses_configured_external_liquidity_source() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1_000_i128, &300_u32, &70_u32);
+
+        let token = env.register_stellar_asset_contract_v2(token_admin);
+        let token_admin_client = StellarAssetClient::new(&env, &token.address());
+        let token_client = token::Client::new(&env, &token.address());
+        let reserve = contract_id.clone();
+
+        client.set_liquidity_token(&token.address());
+        client.set_liquidity_source(&reserve);
+
+        token_admin_client.mint(&reserve, &500_i128);
+        client.draw_credit(&borrower, &120_i128);
+
+        assert_eq!(token_client.balance(&reserve), 380_i128);
+        assert_eq!(token_client.balance(&borrower), 120_i128);
+        assert_eq!(token_client.balance(&contract_id), 380_i128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_liquidity_token_requires_admin_auth() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+
+        let token = env.register_stellar_asset_contract_v2(token_admin);
+        client.set_liquidity_token(&token.address());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_liquidity_source_requires_admin_auth() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let reserve = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.set_liquidity_source(&reserve);
     }
 
     #[test]
