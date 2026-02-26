@@ -21,7 +21,7 @@ use events::{
     publish_risk_parameters_updated, CreditLineEvent, DrawnEvent, RepaymentEvent,
     RiskParametersUpdatedEvent,
 };
-use types::{CreditLineData, CreditStatus};
+use types::{CreditLineData, CreditStatus, RateChangeConfig};
 
 /// Maximum interest rate in basis points (100%).
 const MAX_INTEREST_RATE_BPS: u32 = 10_000;
@@ -37,6 +37,11 @@ fn reentrancy_key(env: &Env) -> Symbol {
 /// Instance storage key for admin.
 fn admin_key(env: &Env) -> Symbol {
     Symbol::new(env, "admin")
+}
+
+/// Instance storage key for rate-change limit configuration.
+fn rate_cfg_key(env: &Env) -> Symbol {
+    Symbol::new(env, "rate_cfg")
 }
 
 fn require_admin(env: &Env) -> Address {
@@ -173,6 +178,7 @@ impl Credit {
             interest_rate_bps,
             risk_score,
             status: CreditStatus::Active,
+            last_rate_update_ts: 0,
         };
 
         env.storage().persistent().set(&borrower, &credit_line);
@@ -312,6 +318,16 @@ impl Credit {
     /// * Panics if no credit line exists for the borrower.
     /// * Panics if bounds are violated (e.g. credit_limit < utilized_amount).
     ///
+    /// # Rate-change limits
+    /// When a `RateChangeConfig` has been set via `set_rate_change_limits`, the
+    /// following additional checks are enforced whenever the interest rate is
+    /// actually changing:
+    /// * The absolute delta `|new_rate - old_rate|` must be ≤
+    ///   `max_rate_change_bps`.
+    /// * If a minimum interval is configured and a previous rate change
+    ///   timestamp exists, the elapsed time since the last change must be ≥
+    ///   `rate_change_min_interval`.
+    ///
     /// Emits a risk_updated event.
     pub fn update_risk_parameters(
         env: Env,
@@ -341,6 +357,29 @@ impl Credit {
             panic!("risk_score exceeds maximum");
         }
 
+        // --- Rate-change limit enforcement (#17) ---
+        let rate_cfg: Option<RateChangeConfig> = env.storage().instance().get(&rate_cfg_key(&env));
+        if let Some(cfg) = rate_cfg {
+            let old_rate = credit_line.interest_rate_bps;
+            if interest_rate_bps != old_rate {
+                // Check minimum interval between rate changes.
+                if credit_line.last_rate_update_ts > 0 && cfg.rate_change_min_interval > 0 {
+                    let now = env.ledger().timestamp();
+                    let elapsed = now.saturating_sub(credit_line.last_rate_update_ts);
+                    if elapsed < cfg.rate_change_min_interval {
+                        panic!("rate change too soon: minimum interval not elapsed");
+                    }
+                }
+                // Check absolute delta cap.
+                let delta = interest_rate_bps.abs_diff(old_rate);
+                if delta > cfg.max_rate_change_bps {
+                    panic!("rate change exceeds maximum allowed delta");
+                }
+                // Record the timestamp of this rate change.
+                credit_line.last_rate_update_ts = env.ledger().timestamp();
+            }
+        }
+
         credit_line.credit_limit = credit_limit;
         credit_line.interest_rate_bps = interest_rate_bps;
         credit_line.risk_score = risk_score;
@@ -355,6 +394,28 @@ impl Credit {
                 risk_score,
             },
         );
+    }
+
+    /// Set rate-change limits (admin only).
+    ///
+    /// Configures the maximum allowed interest-rate change per call and the
+    /// minimum time interval between consecutive rate changes.
+    pub fn set_rate_change_limits(
+        env: Env,
+        max_rate_change_bps: u32,
+        rate_change_min_interval: u64,
+    ) {
+        require_admin_auth(&env);
+        let cfg = RateChangeConfig {
+            max_rate_change_bps,
+            rate_change_min_interval,
+        };
+        env.storage().instance().set(&rate_cfg_key(&env), &cfg);
+    }
+
+    /// Get the current rate-change limit configuration (view function).
+    pub fn get_rate_change_limits(env: Env) -> Option<RateChangeConfig> {
+        env.storage().instance().get(&rate_cfg_key(&env))
     }
 
     /// Suspend a credit line (admin only).
@@ -1754,5 +1815,254 @@ mod test {
 
         token_admin_client.mint(&contract_id, &50_i128);
         client.draw_credit(&borrower, &100_i128);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests: rate-change limits (issue #17)
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod test_rate_change_limits {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::Ledger;
+
+    fn setup<'a>(
+        env: &'a Env,
+        borrower: &'a Address,
+        credit_limit: i128,
+        _reserve_amount: i128,
+    ) -> (CreditClient<'a>, Address) {
+        let admin = Address::generate(env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(env, &contract_id);
+        client.init(&admin);
+        client.open_credit_line(borrower, &credit_limit, &300_u32, &70_u32);
+        (client, admin)
+    }
+
+    #[test]
+    fn test_rate_change_within_limit_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 5_000, 0);
+
+        client.set_rate_change_limits(&100_u32, &0_u64);
+        client.update_risk_parameters(&borrower, &5_000_i128, &350_u32, &70_u32);
+
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.interest_rate_bps, 350);
+    }
+
+    #[test]
+    #[should_panic(expected = "rate change exceeds maximum allowed delta")]
+    fn test_rate_change_over_limit_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 5_000, 0);
+
+        client.set_rate_change_limits(&50_u32, &0_u64);
+        // Current rate is 300; 300 + 51 = 351 → delta 51 > 50
+        client.update_risk_parameters(&borrower, &5_000_i128, &351_u32, &70_u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "rate change exceeds maximum allowed delta")]
+    fn test_rate_decrease_over_limit_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 5_000, 0);
+
+        client.set_rate_change_limits(&50_u32, &0_u64);
+        // Current rate is 300; 300 - 51 = 249 → delta 51 > 50
+        client.update_risk_parameters(&borrower, &5_000_i128, &249_u32, &70_u32);
+    }
+
+    #[test]
+    fn test_rate_change_at_exact_limit_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 5_000, 0);
+
+        client.set_rate_change_limits(&50_u32, &0_u64);
+        // Current rate 300; 300 + 50 = 350 → delta == limit
+        client.update_risk_parameters(&borrower, &5_000_i128, &350_u32, &70_u32);
+
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.interest_rate_bps, 350);
+    }
+
+    #[test]
+    #[should_panic(expected = "rate change exceeds maximum allowed delta")]
+    fn test_rate_change_one_over_limit_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 5_000, 0);
+
+        client.set_rate_change_limits(&50_u32, &0_u64);
+        // Current rate 300; 300 + 51 = 351 → delta 51 > 50
+        client.update_risk_parameters(&borrower, &5_000_i128, &351_u32, &70_u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "rate change too soon: minimum interval not elapsed")]
+    fn test_rate_change_within_interval_reverts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 5_000, 0);
+
+        // Allow up to 100 bps change but only every 3600 seconds (1 hour).
+        client.set_rate_change_limits(&100_u32, &3600_u64);
+
+        // First update at t=100.
+        env.ledger().with_mut(|li| li.timestamp = 100);
+        client.update_risk_parameters(&borrower, &5_000_i128, &350_u32, &70_u32);
+
+        // Second update at t=200 (only 100 s later, < 3600).
+        env.ledger().with_mut(|li| li.timestamp = 200);
+        client.update_risk_parameters(&borrower, &5_000_i128, &330_u32, &70_u32);
+    }
+
+    #[test]
+    fn test_rate_change_after_interval_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 5_000, 0);
+
+        client.set_rate_change_limits(&100_u32, &3600_u64);
+
+        env.ledger().with_mut(|li| li.timestamp = 100);
+        client.update_risk_parameters(&borrower, &5_000_i128, &350_u32, &70_u32);
+
+        // Advance past the interval.
+        env.ledger().with_mut(|li| li.timestamp = 3701);
+        client.update_risk_parameters(&borrower, &5_000_i128, &330_u32, &70_u32);
+
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.interest_rate_bps, 330);
+    }
+
+    #[test]
+    fn test_rate_change_first_update_ignores_interval() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 5_000, 0);
+
+        // Interval set but first update should always pass (last_rate_update_ts == 0).
+        client.set_rate_change_limits(&100_u32, &86400_u64);
+        env.ledger().with_mut(|li| li.timestamp = 10);
+        client.update_risk_parameters(&borrower, &5_000_i128, &350_u32, &70_u32);
+
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.interest_rate_bps, 350);
+    }
+
+    #[test]
+    fn test_same_rate_bypasses_limits() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 5_000, 0);
+
+        // Strict limits: 0 bps max change, huge interval.
+        client.set_rate_change_limits(&0_u32, &999_999_u64);
+
+        // Same rate (300 → 300) should still succeed.
+        client.update_risk_parameters(&borrower, &5_000_i128, &300_u32, &70_u32);
+
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.interest_rate_bps, 300);
+    }
+
+    #[test]
+    fn test_no_rate_limits_configured_backward_compat() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 5_000, 0);
+
+        // No set_rate_change_limits call → unlimited changes.
+        client.update_risk_parameters(&borrower, &5_000_i128, &9_999_u32, &70_u32);
+
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.interest_rate_bps, 9_999);
+    }
+
+    #[test]
+    fn test_set_and_get_rate_change_limits() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+        client.init(&admin);
+
+        client.set_rate_change_limits(&200_u32, &7200_u64);
+        let cfg = client.get_rate_change_limits().unwrap();
+
+        assert_eq!(cfg.max_rate_change_bps, 200);
+        assert_eq!(cfg.rate_change_min_interval, 7200);
+    }
+
+    #[test]
+    fn test_rate_change_timestamp_recorded() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 5_000, 0);
+
+        client.set_rate_change_limits(&100_u32, &0_u64);
+        env.ledger().with_mut(|li| li.timestamp = 42);
+        client.update_risk_parameters(&borrower, &5_000_i128, &350_u32, &70_u32);
+
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.last_rate_update_ts, 42);
+    }
+
+    #[test]
+    fn test_rate_change_multiple_sequential_within_limits() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 5_000, 0);
+
+        client.set_rate_change_limits(&50_u32, &60_u64);
+
+        // First update at t=100: 300 → 350
+        env.ledger().with_mut(|li| li.timestamp = 100);
+        client.update_risk_parameters(&borrower, &5_000_i128, &350_u32, &70_u32);
+
+        // Second update at t=161: 350 → 320 (delta 30 ≤ 50)
+        env.ledger().with_mut(|li| li.timestamp = 161);
+        client.update_risk_parameters(&borrower, &5_000_i128, &320_u32, &65_u32);
+
+        // Third update at t=222: 320 → 370 (delta 50 == limit)
+        env.ledger().with_mut(|li| li.timestamp = 222);
+        client.update_risk_parameters(&borrower, &5_000_i128, &370_u32, &60_u32);
+
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.interest_rate_bps, 370);
+        assert_eq!(line.risk_score, 60);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized")]
+    fn test_set_rate_change_limits_unauthorized() {
+        let env = Env::default();
+        // NOTE: no mock_all_auths → admin auth will fail.
+        let admin = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+        client.init(&admin);
+
+        client.set_rate_change_limits(&100_u32, &0_u64);
     }
 }

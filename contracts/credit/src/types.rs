@@ -20,4 +20,20 @@ pub struct CreditLineData {
     pub interest_rate_bps: u32,
     pub risk_score: u32,
     pub status: CreditStatus,
+    /// Ledger timestamp of the last interest-rate update via `update_risk_parameters`.
+    /// Zero means no rate update has occurred yet.
+    pub last_rate_update_ts: u64,
+}
+
+/// Admin-configurable limits on interest-rate changes.
+///
+/// * `max_rate_change_bps` – Maximum absolute change in `interest_rate_bps`
+///   allowed per single `update_risk_parameters` call.
+/// * `rate_change_min_interval` – Minimum elapsed seconds between two
+///   consecutive rate changes. Set to `0` to disable the time-window check.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RateChangeConfig {
+    pub max_rate_change_bps: u32,
+    pub rate_change_min_interval: u64,
 }
