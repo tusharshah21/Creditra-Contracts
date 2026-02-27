@@ -23,6 +23,13 @@ This repo contains the **credit** contract: it maintains credit lines, tracks ut
   - `set_liquidity_token` — token contract used for reserve and draw transfers.
   - `set_liquidity_source` — reserve address to fund draws (contract or external source).
 
+### Suspend credit line behavior
+
+- `suspend_credit_line` is **admin only** and requires the credit line to exist.
+- Only lines in `Active` status can be suspended.
+- `draw_credit` rejects any draw when the line is not `Active` (including `Suspended`).
+- Repayments are intended to remain allowed while suspended.
+
 ## Tech Stack
 
 - **Rust** (edition 2021)

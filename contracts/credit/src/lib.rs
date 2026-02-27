@@ -303,6 +303,7 @@ impl Credit {
     }
 
     /// Draw from credit line (borrower).
+    /// Reverts if credit line does not exist, is Closed/Suspended, or borrower has not authorized.
     /// Reverts if credit line does not exist, is Closed, or borrower has not authorized.
     pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
         set_reentrancy_guard(&env);
@@ -383,6 +384,15 @@ impl Credit {
             clear_reentrancy_guard(&env);
             panic!("credit line is closed");
         }
+        if credit_line.status == CreditStatus::Suspended {
+            clear_reentrancy_guard(&env);
+            panic!("credit line is suspended");
+        }
+        if amount <= 0 {
+            clear_reentrancy_guard(&env);
+            panic!("amount must be positive");
+        }
+        let new_utilized = credit_line
 
         let updated_utilized = credit_line
             .utilized_amount
@@ -593,6 +603,10 @@ impl Credit {
             .persistent()
             .get(&borrower)
             .expect("Credit line not found");
+
+        if credit_line.status != CreditStatus::Active {
+            panic!("Only active credit lines can be suspended");
+        }
 
         credit_line.status = CreditStatus::Suspended;
         env.storage().persistent().set(&borrower, &credit_line);
@@ -829,6 +843,24 @@ mod test {
 
         let credit_line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(credit_line.status, CreditStatus::Suspended);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only active credit lines can be suspended")]
+    fn test_suspend_credit_line_only_when_active() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+        client.suspend_credit_line(&borrower);
+        client.suspend_credit_line(&borrower);
     }
 
     #[test]
@@ -1707,6 +1739,25 @@ mod test {
         client.repay_credit(&borrower, &-500_i128);
     }
 
+    #[test]
+    #[should_panic(expected = "credit line is suspended")]
+    fn test_draw_credit_rejected_when_suspended() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+        client.suspend_credit_line(&borrower);
+        client.draw_credit(&borrower, &100_i128);
+    }
+
+    // --- update_risk_parameters (#9) ---
     // --- update_risk_parameters ---
 
     #[test]
