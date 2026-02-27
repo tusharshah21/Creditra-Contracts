@@ -1,3 +1,39 @@
+//! # Creditra Credit Contract
+//!
+//! This module implements the on-chain credit line protocol for Creditra on
+//! Stellar Soroban. It manages the full lifecycle of borrower credit lines —
+//! opening, drawing, repaying, suspending, closing, and defaulting.
+//!
+//! ## Roles
+//!
+//! - **Admin**: Deployed and initialized by the protocol deployer. Authorized
+//!   to suspend, close, and default credit lines, and update risk parameters.
+//! - **Borrower**: An address with an open credit line. Authorized to draw
+//!   and repay funds within their credit limit.
+//! - **Risk Engine / Backend**: Authorized to open credit lines and update
+//!   risk parameters on behalf of the protocol.
+//!
+//! ## Main Flows
+//!
+//! 1. **Open**: Admin/backend calls `open_credit_line` to create a credit line
+//!    for a borrower with a limit, interest rate, and risk score.
+//! 2. **Draw**: Borrower calls `draw_credit` to borrow against their limit.
+//! 3. **Repay**: Borrower calls `repay_credit` to repay drawn funds.
+//! 4. **Suspend**: Admin calls `suspend_credit_line` to temporarily freeze a line.
+//! 5. **Close**: Admin or borrower calls `close_credit_line` to permanently close.
+//! 6. **Default**: Admin calls `default_credit_line` to mark a borrower as defaulted.
+//!
+//! ## Invariants
+//!
+//! - `utilized_amount` must never exceed `credit_limit`.
+//! - A credit line must exist before it can be suspended, closed, or defaulted.
+//! - Interest rate is expressed in basis points (1 bps = 0.01%).
+//!
+//! ## External Docs
+//!
+//! See [`docs/credit.md`](../../../docs/credit.md) for full documentation
+//! including CLI usage and deployment instructions.
+
 #![no_std]
 #![allow(clippy::unused_unit)]
 
@@ -39,6 +75,18 @@ fn admin_key(env: &Env) -> Symbol {
     Symbol::new(env, "admin")
 }
 
+/// Represents the lifecycle status of a credit line.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CreditStatus {
+    /// Credit line is open and available for drawing.
+    Active = 0,
+    /// Credit line is temporarily suspended by admin.
+    Suspended = 1,
+    /// Borrower has defaulted on the credit line.
+    Defaulted = 2,
+    /// Credit line has been permanently closed.
+    Closed = 3,
 fn require_admin(env: &Env) -> Address {
     env.storage()
         .instance()
@@ -46,7 +94,41 @@ fn require_admin(env: &Env) -> Address {
         .expect("admin not set")
 }
 
+/// Stores the full state of a borrower's credit line.
+///
+/// Persisted in contract storage keyed by the borrower's [`Address`].
 #[contracttype]
+pub struct CreditLineData {
+    /// The borrower's Stellar address.
+    pub borrower: Address,
+    /// Maximum amount the borrower is authorized to draw.
+    pub credit_limit: i128,
+    /// Amount currently drawn and outstanding.
+    pub utilized_amount: i128,
+    /// Annual interest rate in basis points (e.g. 300 = 3%).
+    pub interest_rate_bps: u32,
+    /// Risk score assigned by the risk engine (0–100, higher = riskier).
+    pub risk_score: u32,
+    /// Current lifecycle status of the credit line.
+    pub status: CreditStatus,
+}
+
+/// Event emitted on every credit line lifecycle state change.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreditLineEvent {
+    /// Short symbol identifying the event type (e.g. `opened`, `suspend`).
+    pub event_type: Symbol,
+    /// The borrower whose credit line was affected.
+    pub borrower: Address,
+    /// The new status after the event.
+    pub status: CreditStatus,
+    /// Credit limit at the time of the event.
+    pub credit_limit: i128,
+    /// Interest rate at the time of the event.
+    pub interest_rate_bps: u32,
+    /// Risk score at the time of the event.
+    pub risk_score: u32,
 #[derive(Debug, Clone, PartialEq)]
 pub enum CreditError {
     CreditLineNotFound = 1,
@@ -90,11 +172,22 @@ fn clear_reentrancy_guard(env: &Env) {
     env.storage().instance().set(&reentrancy_key(env), &false);
 }
 
+/// The Creditra credit contract.
 #[contract]
 pub struct Credit;
 
 #[contractimpl]
 impl Credit {
+    /// Initialize the contract with an admin address.
+    ///
+    /// Must be called exactly once after deployment before any other
+    /// function can be used.
+    ///
+    /// # Parameters
+    /// - `admin`: The address authorized to perform admin operations.
+    ///
+    /// # Storage
+    /// Stores `admin` in instance storage under the key `"admin"`.
     /// @notice Initializes contract-level configuration.
     /// @dev Sets admin and defaults liquidity source to this contract address.
     pub fn init(env: Env, admin: Address) -> () {
@@ -125,6 +218,20 @@ impl Credit {
         ()
     }
 
+    /// Open a new credit line for a borrower.
+    ///
+    /// Called by the backend or risk engine after off-chain credit assessment.
+    /// Creates a new [`CreditLineData`] record with `utilized_amount = 0` and
+    /// `status = Active`, then persists it keyed by the borrower's address.
+    ///
+    /// # Parameters
+    /// - `borrower`: The borrower's Stellar address.
+    /// - `credit_limit`: Maximum drawable amount.
+    /// - `interest_rate_bps`: Annual interest rate in basis points.
+    /// - `risk_score`: Risk score from the risk engine (0–100).
+    ///
+    /// # Events
+    /// Emits a `("credit", "opened")` [`CreditLineEvent`].
     /// Open a new credit line for a borrower (called by backend/risk engine).
     ///
     /// # Arguments
@@ -177,6 +284,7 @@ impl Credit {
 
         env.storage().persistent().set(&borrower, &credit_line);
 
+        env.events().publish(
         publish_credit_line_event(
             &env,
             (symbol_short!("credit"), symbol_short!("opened")),
@@ -191,6 +299,51 @@ impl Credit {
         );
     }
 
+    /// Draw funds from an active credit line.
+    ///
+    /// Called by the borrower to borrow against their credit limit.
+    ///
+    /// # Parameters
+    /// - `borrower`: The borrower's address.
+    /// - `amount`: Amount to draw. Must not exceed available credit.
+    ///
+    /// # Note
+    /// Not yet implemented. Planned logic: validate amount against available
+    /// credit, update `utilized_amount`, transfer tokens to borrower.
+    pub fn draw_credit(_env: Env, _borrower: Address, _amount: i128) -> () {
+        // TODO: check limit, update utilized_amount, transfer token to borrower
+        ()
+    }
+
+    /// Repay outstanding credit and accrue interest.
+    ///
+    /// Called by the borrower to reduce their `utilized_amount`.
+    ///
+    /// # Parameters
+    /// - `borrower`: The borrower's address.
+    /// - `amount`: Amount to repay.
+    ///
+    /// # Note
+    /// Not yet implemented. Planned logic: accept token transfer, reduce
+    /// `utilized_amount`, accrue interest on outstanding balance.
+    pub fn repay_credit(_env: Env, _borrower: Address, _amount: i128) -> () {
+        // TODO: accept token, reduce utilized_amount, accrue interest
+        ()
+    }
+
+    /// Update risk parameters for an existing credit line.
+    ///
+    /// Called by admin or risk engine when a borrower's risk profile changes.
+    ///
+    /// # Parameters
+    /// - `borrower`: The borrower's address.
+    /// - `credit_limit`: New credit limit.
+    /// - `interest_rate_bps`: New interest rate in basis points.
+    /// - `risk_score`: New risk score.
+    ///
+    /// # Note
+    /// Not yet implemented. Planned logic: load existing record, update fields,
+    /// persist updated [`CreditLineData`].
     /// @notice Draws credit by transferring liquidity tokens to the borrower.
     /// @dev Enforces status/limit/liquidity checks and uses a reentrancy guard.
     pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
@@ -357,6 +510,20 @@ impl Credit {
         );
     }
 
+    /// Suspend a credit line temporarily.
+    ///
+    /// Called by admin to freeze a borrower's credit line without closing it.
+    /// The credit line can be reactivated or closed after suspension.
+    ///
+    /// # Parameters
+    /// - `borrower`: The borrower's address.
+    ///
+    /// # Panics
+    /// - If no credit line exists for the given borrower.
+    ///
+    /// # Events
+    /// Emits a `("credit", "suspend")` [`CreditLineEvent`].
+    pub fn suspend_credit_line(env: Env, borrower: Address) -> () {
     /// Suspend a credit line (admin only).
     /// Emits a CreditLineSuspended event.
     pub fn suspend_credit_line(env: Env, borrower: Address) {
@@ -370,6 +537,7 @@ impl Credit {
         credit_line.status = CreditStatus::Suspended;
         env.storage().persistent().set(&borrower, &credit_line);
 
+        env.events().publish(
         publish_credit_line_event(
             &env,
             (symbol_short!("credit"), symbol_short!("suspend")),
@@ -384,6 +552,20 @@ impl Credit {
         );
     }
 
+    /// Permanently close a credit line.
+    ///
+    /// Can be called by admin or by the borrower when `utilized_amount` is 0.
+    /// Once closed, the credit line cannot be reopened.
+    ///
+    /// # Parameters
+    /// - `borrower`: The borrower's address.
+    ///
+    /// # Panics
+    /// - If no credit line exists for the given borrower.
+    ///
+    /// # Events
+    /// Emits a `("credit", "closed")` [`CreditLineEvent`].
+    pub fn close_credit_line(env: Env, borrower: Address) -> () {
     /// Close a credit line. Callable by admin (force-close) or by borrower when utilization is zero.
     ///
     /// # Arguments
@@ -423,6 +605,7 @@ impl Credit {
         credit_line.status = CreditStatus::Closed;
         env.storage().persistent().set(&borrower, &credit_line);
 
+        env.events().publish(
         publish_credit_line_event(
             &env,
             (symbol_short!("credit"), symbol_short!("closed")),
@@ -437,6 +620,20 @@ impl Credit {
         );
     }
 
+    /// Mark a credit line as defaulted.
+    ///
+    /// Called by admin when a borrower fails to repay. Defaulted credit lines
+    /// are permanently marked and cannot be reactivated.
+    ///
+    /// # Parameters
+    /// - `borrower`: The borrower's address.
+    ///
+    /// # Panics
+    /// - If no credit line exists for the given borrower.
+    ///
+    /// # Events
+    /// Emits a `("credit", "default")` [`CreditLineEvent`].
+    pub fn default_credit_line(env: Env, borrower: Address) -> () {
     /// Mark a credit line as defaulted (admin only).
     /// Emits a CreditLineDefaulted event.
     pub fn default_credit_line(env: Env, borrower: Address) {
@@ -450,6 +647,7 @@ impl Credit {
         credit_line.status = CreditStatus::Defaulted;
         env.storage().persistent().set(&borrower, &credit_line);
 
+        env.events().publish(
         publish_credit_line_event(
             &env,
             (symbol_short!("credit"), symbol_short!("default")),
@@ -464,6 +662,15 @@ impl Credit {
         );
     }
 
+    /// Retrieve the current credit line data for a borrower.
+    ///
+    /// View function — does not modify any state.
+    ///
+    /// # Parameters
+    /// - `borrower`: The borrower's address to look up.
+    ///
+    /// # Returns
+    /// `Some(CreditLineData)` if a credit line exists, `None` otherwise.
     /// Read-only getter for credit line by borrower
     ///
     /// @param borrower The address to query
@@ -608,6 +815,14 @@ mod test {
         let client = CreditClient::new(&env, &contract_id);
 
         client.init(&admin);
+        client.open_credit_line(&borrower, &5000_i128, &500_u32, &80_u32);
+        assert_eq!(client.get_credit_line(&borrower).unwrap().status, CreditStatus::Active);
+
+        client.suspend_credit_line(&borrower);
+        assert_eq!(client.get_credit_line(&borrower).unwrap().status, CreditStatus::Suspended);
+
+        client.close_credit_line(&borrower);
+        assert_eq!(client.get_credit_line(&borrower).unwrap().status, CreditStatus::Closed);
         client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
         // Second open for same borrower while Active must revert.
         client.open_credit_line(&borrower, &2000_i128, &400_u32, &60_u32);
@@ -644,6 +859,14 @@ mod test {
         let client = CreditClient::new(&env, &contract_id);
 
         client.init(&admin);
+        client.open_credit_line(&borrower, &2000_i128, &400_u32, &75_u32);
+
+        let credit_line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(credit_line.borrower, borrower);
+        assert_eq!(credit_line.status, CreditStatus::Active);
+        assert_eq!(credit_line.credit_limit, 2000);
+        assert_eq!(credit_line.interest_rate_bps, 400);
+        assert_eq!(credit_line.risk_score, 75);
         client.open_credit_line(&borrower, &-1_i128, &300_u32, &70_u32);
     }
 
@@ -770,6 +993,11 @@ mod test {
         let client = CreditClient::new(&env, &contract_id);
 
         client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+        assert_eq!(client.get_credit_line(&borrower).unwrap().status, CreditStatus::Active);
+
+        client.default_credit_line(&borrower);
+        assert_eq!(client.get_credit_line(&borrower).unwrap().status, CreditStatus::Defaulted);
         let limit = 5000_i128;
         client.open_credit_line(&borrower, &limit, &300_u32, &70_u32);
 
