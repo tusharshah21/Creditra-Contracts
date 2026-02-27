@@ -757,9 +757,12 @@ impl Credit {
 mod test {
     use super::*;
     use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::token;
     use soroban_sdk::contractclient::ContractClient;
     use soroban_sdk::testutils::Events;
     use soroban_sdk::token::StellarAssetClient;
+    use soroban_sdk::{TryFromVal, TryIntoVal};
 
     fn setup_test(env: &Env) -> (Address, Address, Address) {
         env.mock_all_auths();
@@ -774,6 +777,37 @@ mod test {
         client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
 
         (admin, borrower, contract_id)
+    }
+
+    fn setup_token<'a>(
+        env: &'a Env,
+        contract_id: &'a Address,
+        reserve_amount: i128,
+    ) -> (Address, token::StellarAssetClient<'a>) {
+        let token_admin = Address::generate(env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin);
+        let token_address = token_id.address();
+        let sac = token::StellarAssetClient::new(env, &token_address);
+        if reserve_amount > 0 {
+            sac.mint(contract_id, &reserve_amount);
+        }
+        (token_address, sac)
+    }
+
+    fn setup_contract_with_credit_line<'a>(
+        env: &'a Env,
+        borrower: &'a Address,
+        credit_limit: i128,
+        reserve_amount: i128,
+    ) -> (CreditClient<'a>, Address, Address) {
+        let admin = Address::generate(env);
+        let contract_id = env.register(Credit, ());
+        let (token_address, _sac) = setup_token(env, &contract_id, reserve_amount);
+        let client = CreditClient::new(env, &contract_id);
+        client.init(&admin);
+        client.set_liquidity_token(&token_address);
+        client.open_credit_line(borrower, &credit_limit, &300_u32, &70_u32);
+        (client, token_address, admin)
     }
 
     fn call_contract<F>(env: &Env, contract_id: &Address, f: F)
@@ -2227,6 +2261,401 @@ mod test {
         );
     }
 
+    // ── event emission ────────────────────────────────────────────────────────
+
+    /// Test that repay_credit emits RepaymentEvent with correct payload.
+    #[test]
+    fn test_event_repay_credit_payload() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _token, _admin) =
+            setup_contract_with_credit_line(&env, &borrower, 5_000, 5_000);
+        client.draw_credit(&borrower, &1000_i128);
+
+        // Repay 400
+        client.repay_credit(&borrower, &400_i128);
+
+        // Get the events (last event is the repay event)
+        let events = env.events().all();
+        let (_contract, topics, data) = events.last().unwrap();
+
+        // Verify event topics
+        assert_eq!(topics.len(), 2);
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+            symbol_short!("credit")
+        );
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+            symbol_short!("repay")
+        );
+
+        // Verify event data
+        let event_data: RepaymentEvent = data.try_into_val(&env).unwrap();
+        assert_eq!(event_data.borrower, borrower);
+        assert_eq!(event_data.amount, 400);
+        assert_eq!(event_data.new_utilized_amount, 600);
+    }
+
+    /// Test that repay_credit emits correct event for full repayment.
+    #[test]
+    fn test_event_repay_credit_full_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _token, _admin) =
+            setup_contract_with_credit_line(&env, &borrower, 5_000, 5_000);
+        client.draw_credit(&borrower, &2000_i128);
+
+        // Repay full amount
+        client.repay_credit(&borrower, &2000_i128);
+
+        let events = env.events().all();
+        let (_contract, _topics, data) = events.last().unwrap();
+        let event_data: RepaymentEvent = data.try_into_val(&env).unwrap();
+        assert_eq!(event_data.borrower, borrower);
+        assert_eq!(event_data.amount, 2000);
+        assert_eq!(event_data.new_utilized_amount, 0);
+    }
+
+    /// Test that repay_credit emits correct event for overpayment (saturating).
+    #[test]
+    fn test_event_repay_credit_overpayment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _token, _admin) =
+            setup_contract_with_credit_line(&env, &borrower, 5_000, 1_000);
+        client.draw_credit(&borrower, &500_i128);
+
+        // Repay more than utilized (should saturate to 0)
+        client.repay_credit(&borrower, &1000_i128);
+
+        let events = env.events().all();
+        let (_contract, _topics, data) = events.last().unwrap();
+        let event_data: RepaymentEvent = data.try_into_val(&env).unwrap();
+        assert_eq!(event_data.borrower, borrower);
+        assert_eq!(event_data.amount, 1000);
+        assert_eq!(event_data.new_utilized_amount, 0);
+    }
+
+    /// Test multiple repay events are correctly emitted.
+    #[test]
+    fn test_event_multiple_repayments() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _token, _admin) =
+            setup_contract_with_credit_line(&env, &borrower, 10_000, 10_000);
+        client.draw_credit(&borrower, &5000_i128);
+
+        // First repayment
+        client.repay_credit(&borrower, &1000_i128);
+        let events = env.events().all();
+        let (_c, _topics, data) = events.last().unwrap();
+        let repay1_data: RepaymentEvent = data.try_into_val(&env).unwrap();
+        assert_eq!(repay1_data.amount, 1000);
+        assert_eq!(repay1_data.new_utilized_amount, 4000);
+
+        // Second repayment
+        client.repay_credit(&borrower, &2000_i128);
+        let events = env.events().all();
+        let (_c, _topics, data) = events.last().unwrap();
+        let repay2_data: RepaymentEvent = data.try_into_val(&env).unwrap();
+        assert_eq!(repay2_data.amount, 2000);
+        assert_eq!(repay2_data.new_utilized_amount, 2000);
+
+        // Third repayment
+        client.repay_credit(&borrower, &1500_i128);
+        let events = env.events().all();
+        let (_c, _topics, data) = events.last().unwrap();
+        let repay3_data: RepaymentEvent = data.try_into_val(&env).unwrap();
+        assert_eq!(repay3_data.amount, 1500);
+        assert_eq!(repay3_data.new_utilized_amount, 500);
+    }
+
+    /// Test that open_credit_line emits CreditLineEvent with correct payload.
+    #[test]
+    fn test_event_open_credit_line() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let _ = client;
+        let events = env.events().all();
+        let (_contract, topics, data) = events.last().unwrap();
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+            symbol_short!("opened")
+        );
+        let event_data: CreditLineEvent = data.try_into_val(&env).unwrap();
+        assert_eq!(event_data.status, CreditStatus::Active);
+        assert_eq!(event_data.borrower, borrower);
+    }
+
+    #[test]
+    fn test_event_suspend_credit_line() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        client.suspend_credit_line(&borrower);
+        let events = env.events().all();
+        let (_contract, topics, data) = events.last().unwrap();
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+            symbol_short!("suspend")
+        );
+        let event_data: CreditLineEvent = data.try_into_val(&env).unwrap();
+        assert_eq!(event_data.status, CreditStatus::Suspended);
+    }
+
+    #[test]
+    fn test_event_close_credit_line() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _token, admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        client.close_credit_line(&borrower, &admin);
+        let events = env.events().all();
+        let (_contract, topics, data) = events.last().unwrap();
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+            symbol_short!("closed")
+        );
+        let event_data: CreditLineEvent = data.try_into_val(&env).unwrap();
+        assert_eq!(event_data.status, CreditStatus::Closed);
+    }
+
+    #[test]
+    fn test_event_default_credit_line() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _token, _admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        client.default_credit_line(&borrower);
+        let events = env.events().all();
+        let (_contract, topics, data) = events.last().unwrap();
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+            symbol_short!("default")
+        );
+        let event_data: CreditLineEvent = data.try_into_val(&env).unwrap();
+        assert_eq!(event_data.status, CreditStatus::Defaulted);
+    }
+
+    #[test]
+    fn test_event_lifecycle_sequence() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _token, admin) = setup_contract_with_credit_line(&env, &borrower, 1_000, 0);
+        let open_data: CreditLineEvent = env
+            .events()
+            .all()
+            .last()
+            .unwrap()
+            .2
+            .try_into_val(&env)
+            .unwrap();
+        assert_eq!(open_data.status, CreditStatus::Active);
+
+        client.suspend_credit_line(&borrower);
+        let suspend_data: CreditLineEvent = env
+            .events()
+            .all()
+            .last()
+            .unwrap()
+            .2
+            .try_into_val(&env)
+            .unwrap();
+        assert_eq!(suspend_data.status, CreditStatus::Suspended);
+        assert_eq!(
+            Symbol::try_from_val(&env, &env.events().all().last().unwrap().1.get(1).unwrap())
+                .unwrap(),
+            symbol_short!("suspend")
+        );
+
+        client.close_credit_line(&borrower, &admin);
+        let close_data: CreditLineEvent = env
+            .events()
+            .all()
+            .last()
+            .unwrap()
+            .2
+            .try_into_val(&env)
+            .unwrap();
+        assert_eq!(close_data.status, CreditStatus::Closed);
+    }
+
+    /// Test that event data remains consistent across lifecycle operations.
+    #[test]
+    fn test_event_data_consistency_across_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let (token_address, _) = setup_token(&env, &contract_id, 0);
+        let client = CreditClient::new(&env, &contract_id);
+        client.init(&admin);
+        client.set_liquidity_token(&token_address);
+
+        // Open with specific parameters
+        let credit_limit = 7500_i128;
+        let interest_rate = 450_u32;
+        let risk_score = 85_u32;
+
+        client.open_credit_line(&borrower, &credit_limit, &interest_rate, &risk_score);
+        let events = env.events().all();
+        let (_c, _topics, data) = events.last().unwrap();
+        let open_data: CreditLineEvent = data.try_into_val(&env).unwrap();
+        assert_eq!(open_data.credit_limit, credit_limit);
+        assert_eq!(open_data.interest_rate_bps, interest_rate);
+        assert_eq!(open_data.risk_score, risk_score);
+
+        client.suspend_credit_line(&borrower);
+        let events = env.events().all();
+        let (_c, _topics, data) = events.last().unwrap();
+        let suspend_data: CreditLineEvent = data.try_into_val(&env).unwrap();
+        assert_eq!(suspend_data.credit_limit, credit_limit);
+        assert_eq!(suspend_data.interest_rate_bps, interest_rate);
+        assert_eq!(suspend_data.risk_score, risk_score);
+
+        client.default_credit_line(&borrower);
+        let events = env.events().all();
+        let (_c, _topics, data) = events.last().unwrap();
+        let default_data: CreditLineEvent = data.try_into_val(&env).unwrap();
+        assert_eq!(default_data.credit_limit, credit_limit);
+        assert_eq!(default_data.interest_rate_bps, interest_rate);
+        assert_eq!(default_data.risk_score, risk_score);
+    }
+
+    // =========================================================================
+    // Integration tests: full lifecycle flows (open → draw → repay → close)
+    // =========================================================================
+
+    /// End-to-end flow: init → open → draw × 2 → repay × 2 → borrower close.
+    ///
+    /// Asserts every state transition and event count along the way.
+    /// Events are checked immediately after each emitting call (before any
+    /// subsequent contract call clears the per-invocation event buffer).
+    #[test]
+    fn test_integration_flow_open_draw_repay_close() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let (token_address, _) = setup_token(&env, &contract_id, 10_000);
+        let client = CreditClient::new(&env, &contract_id);
+        client.init(&admin);
+        client.set_liquidity_token(&token_address);
+
+        // --- 1. Open credit line --------------------------------------------
+        client.open_credit_line(&borrower, &10_000_i128, &500_u32, &75_u32);
+        // CreditLineOpened event — check BEFORE next contract call resets buffer
+        assert_eq!(env.events().all().len(), 1);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.borrower, borrower);
+        assert_eq!(cl.credit_limit, 10_000);
+        assert_eq!(cl.utilized_amount, 0);
+        assert_eq!(cl.interest_rate_bps, 500);
+        assert_eq!(cl.risk_score, 75);
+        assert_eq!(cl.status, CreditStatus::Active);
+
+        // --- 2. First draw: 3 000 -------------------------------------------
+        client.draw_credit(&borrower, &3_000_i128);
+        // draw_credit emits 2 events: SAC transfer event + (credit, draw) event
+        assert_eq!(env.events().all().len(), 2);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.utilized_amount, 3_000);
+        assert_eq!(cl.status, CreditStatus::Active);
+
+        // --- 3. Second draw: 2 000 (cumulative: 5 000) ----------------------
+        client.draw_credit(&borrower, &2_000_i128);
+        assert_eq!(env.events().all().len(), 2);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.utilized_amount, 5_000);
+        assert_eq!(cl.credit_limit, 10_000);
+        assert_eq!(cl.status, CreditStatus::Active);
+
+        // --- 4. First repay: 2 500 (utilized → 2 500) -----------------------
+        client.repay_credit(&borrower, &2_500_i128);
+        // repay emits RepaymentEvent
+        assert_eq!(env.events().all().len(), 1);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.status, CreditStatus::Active);
+        assert_eq!(cl.utilized_amount, 2_500);
+
+        // --- 5. Second repay: 2 500 (utilized → 0) --------------------------
+        client.repay_credit(&borrower, &2_500_i128);
+        assert_eq!(env.events().all().len(), 1);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.status, CreditStatus::Active);
+        assert_eq!(cl.utilized_amount, 0);
+
+        // --- 6. Borrower self-closes (utilized == 0) -------------------------
+        client.close_credit_line(&borrower, &borrower);
+        // CreditLineClosed event — check BEFORE next contract call resets buffer
+        assert_eq!(env.events().all().len(), 1);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.status, CreditStatus::Closed);
+        assert_eq!(cl.credit_limit, 10_000);
+        assert_eq!(cl.interest_rate_bps, 500);
+        assert_eq!(cl.risk_score, 75);
+    }
+
+    /// Integration variant: open → (no draw) → borrower self-closes when utilized == 0.
+    ///
+    /// Confirms a borrower may close their own line with no outstanding balance,
+    /// and that the correct state and events are recorded.
+    #[test]
+    fn test_integration_flow_borrower_close_zero_utilized() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(Credit, ());
+        let (token_address, _) = setup_token(&env, &contract_id, 0);
+        let client = CreditClient::new(&env, &contract_id);
+        client.init(&admin);
+        client.set_liquidity_token(&token_address);
+
+        // --- 1. Open --------------------------------------------------------
+        client.open_credit_line(&borrower, &5_000_i128, &300_u32, &60_u32);
+        // CreditLineOpened event — check BEFORE next contract call resets buffer
+        assert_eq!(env.events().all().len(), 1);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.status, CreditStatus::Active);
+        assert_eq!(cl.utilized_amount, 0);
+        assert_eq!(cl.credit_limit, 5_000);
+        assert_eq!(cl.interest_rate_bps, 300);
+        assert_eq!(cl.risk_score, 60);
+
+        // --- 2. Borrower closes with zero utilization -----------------------
+        client.close_credit_line(&borrower, &borrower);
+        // CreditLineClosed event — check BEFORE next contract call resets buffer
+        assert_eq!(env.events().all().len(), 1);
+
+        let cl = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(cl.status, CreditStatus::Closed);
+        assert_eq!(cl.utilized_amount, 0);
+    }
+
+    // ── liquidity source tests ───────────────────────────────────────────────
+
     #[test]
     fn test_draw_credit_with_sufficient_liquidity() {
         let env = Env::default();
@@ -2647,5 +3076,175 @@ mod test {
 
         token_admin_client.mint(&contract_id, &50_i128);
         client.draw_credit(&borrower, &100_i128);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests: close_credit_line with outstanding utilization
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod test_close_utilized {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    fn setup<'a>(
+        env: &'a Env,
+        borrower: &'a Address,
+        credit_limit: i128,
+        reserve_amount: i128,
+    ) -> (CreditClient<'a>, Address) {
+        let admin = Address::generate(env);
+        let contract_id = env.register(Credit, ());
+        let token_admin = Address::generate(env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin);
+        let token_address = token_id.address();
+        if reserve_amount > 0 {
+            let sac = soroban_sdk::token::StellarAssetClient::new(env, &token_address);
+            sac.mint(&contract_id, &reserve_amount);
+        }
+        let client = CreditClient::new(env, &contract_id);
+        client.init(&admin);
+        client.set_liquidity_token(&token_address);
+        client.open_credit_line(borrower, &credit_limit, &300_u32, &70_u32);
+        (client, admin)
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot close: utilized amount not zero")]
+    fn test_close_utilized_borrower_rejected_at_minimum_utilization() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 1_000, 1_000);
+        client.draw_credit(&borrower, &1);
+        client.close_credit_line(&borrower, &borrower);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot close: utilized amount not zero")]
+    fn test_close_utilized_borrower_rejected_at_full_utilization() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 500, 500);
+        client.draw_credit(&borrower, &500);
+        client.close_credit_line(&borrower, &borrower);
+    }
+
+    #[test]
+    fn test_close_utilized_admin_force_close_preserves_utilized_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, admin) = setup(&env, &borrower, 1_000, 1_000);
+        client.draw_credit(&borrower, &750);
+        client.close_credit_line(&borrower, &admin);
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.status, CreditStatus::Closed);
+        assert_eq!(line.utilized_amount, 750);
+    }
+
+    #[test]
+    fn test_close_utilized_admin_force_close_emits_closed_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, admin) = setup(&env, &borrower, 1_000, 1_000);
+        client.draw_credit(&borrower, &400);
+        client.close_credit_line(&borrower, &admin);
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.status, CreditStatus::Closed);
+        assert_eq!(line.utilized_amount, 400);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot close: utilized amount not zero")]
+    fn test_close_utilized_borrower_rejected_on_suspended_line() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 1_000, 1_000);
+        client.draw_credit(&borrower, &200);
+        client.suspend_credit_line(&borrower);
+        client.close_credit_line(&borrower, &borrower);
+    }
+
+    #[test]
+    fn test_close_utilized_admin_force_close_suspended_line() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, admin) = setup(&env, &borrower, 1_000, 1_000);
+        client.draw_credit(&borrower, &600);
+        client.suspend_credit_line(&borrower);
+        client.close_credit_line(&borrower, &admin);
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.status, CreditStatus::Closed);
+        assert_eq!(line.utilized_amount, 600);
+    }
+
+    #[test]
+    fn test_close_utilized_borrower_succeeds_after_full_repayment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 1_000, 1_000);
+        client.draw_credit(&borrower, &350);
+        client.repay_credit(&borrower, &350);
+        assert_eq!(
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            0
+        );
+        client.close_credit_line(&borrower, &borrower);
+        assert_eq!(
+            client.get_credit_line(&borrower).unwrap().status,
+            CreditStatus::Closed
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn test_close_utilized_third_party_rejected_with_zero_utilization() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let third_party = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 1_000, 0);
+        client.close_credit_line(&borrower, &third_party);
+    }
+
+    #[test]
+    fn test_close_utilized_admin_force_close_multiple_draws() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, admin) = setup(&env, &borrower, 1_000, 1_000);
+        client.draw_credit(&borrower, &100);
+        client.draw_credit(&borrower, &150);
+        client.draw_credit(&borrower, &250);
+        assert_eq!(
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            500
+        );
+        client.close_credit_line(&borrower, &admin);
+        let line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(line.status, CreditStatus::Closed);
+        assert_eq!(line.utilized_amount, 500);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot close: utilized amount not zero")]
+    fn test_close_utilized_borrower_rejected_after_partial_repayment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let borrower = Address::generate(&env);
+        let (client, _admin) = setup(&env, &borrower, 1_000, 1_000);
+        client.draw_credit(&borrower, &400);
+        client.repay_credit(&borrower, &200);
+        assert_eq!(
+            client.get_credit_line(&borrower).unwrap().utilized_amount,
+            200
+        );
+        client.close_credit_line(&borrower, &borrower);
     }
 }
