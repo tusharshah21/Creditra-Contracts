@@ -57,7 +57,7 @@ use events::{
     publish_risk_parameters_updated, CreditLineEvent, DrawnEvent, RepaymentEvent,
     RiskParametersUpdatedEvent,
 };
-use types::{CreditLineData, CreditStatus};
+use types::{ContractError, CreditLineData, CreditStatus};
 
 /// Maximum interest rate in basis points (100%).
 const MAX_INTEREST_RATE_BPS: u32 = 10_000;
@@ -91,7 +91,7 @@ fn require_admin(env: &Env) -> Address {
     env.storage()
         .instance()
         .get(&admin_key(env))
-        .expect("admin not set")
+        .unwrap_or_else(|| env.panic_with_error(ContractError::NotAdmin))
 }
 
 /// Stores the full state of a borrower's credit line.
@@ -163,7 +163,7 @@ fn set_reentrancy_guard(env: &Env) {
     let key = reentrancy_key(env);
     let current: bool = env.storage().instance().get(&key).unwrap_or(false);
     if current {
-        panic!("reentrancy guard");
+        env.panic_with_error(ContractError::Reentrancy);
     }
     env.storage().instance().set(&key, &true);
 }
@@ -302,6 +302,33 @@ impl Credit {
         );
     }
 
+
+
+    /// Draw from credit line (borrower).
+ 
+    /// Errors with ContractError if credit line does not exist, is Closed, or borrower has not authorized.
+
+    /// Reverts if credit line does not exist, is Closed, borrower has not authorized,
+    /// or the provided borrower does not match the stored credit line owner.
+ 
+ 
+    pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
+
+
+    /// Draw from credit line: verifies limit, updates utilized_amount,
+    /// and transfers the protocol token from the contract reserve to the borrower.
+    ///
+    /// # Panics
+    /// - `"Credit line not found"` – borrower has no open credit line
+    /// - `"credit line is closed"` – line is closed
+    /// - `"Credit line not active"` – line is suspended or defaulted
+    /// - `"exceeds credit limit"` – draw would push utilized_amount past credit_limit
+    /// - `"amount must be positive"` – amount is zero or negative
+    /// - `"reentrancy guard"` – re-entrant call detected
+
+    pub fn draw_credit(env: Env, borrower: Address, amount: i128) {
+ 
+
     /// Draw from credit line (borrower).
     /// Reverts if credit line does not exist, is Closed/Suspended, or borrower has not authorized.
     /// Reverts if credit line does not exist, is Closed, or borrower has not authorized.
@@ -359,6 +386,7 @@ impl Credit {
     /// @notice Draws credit by transferring liquidity tokens to the borrower.
     /// @dev Enforces status/limit/liquidity checks and uses a reentrancy guard.
     pub fn draw_credit(env: Env, borrower: Address, amount: i128) -> () {
+
         set_reentrancy_guard(&env);
         borrower.require_auth();
 
@@ -378,11 +406,36 @@ impl Credit {
             .storage()
             .persistent()
             .get(&borrower)
+ 
+            .unwrap_or_else(|| {
+                clear_reentrancy_guard(&env);
+                env.panic_with_error(ContractError::CreditLineNotFound)
+            });
+
             .expect("Credit line not found");
+
+
+        if credit_line.borrower != borrower {
+            clear_reentrancy_guard(&env);
+            panic!("Borrower mismatch for credit line");
+        }
+
+ 
+
 
         if credit_line.status == CreditStatus::Closed {
             clear_reentrancy_guard(&env);
-            panic!("credit line is closed");
+            env.panic_with_error(ContractError::CreditLineClosed);
+        }
+
+
+        if credit_line.status != CreditStatus::Active {
+            clear_reentrancy_guard(&env);
+
+            env.panic_with_error(ContractError::InvalidAmount);
+
+            panic!("Credit line not active");
+
         }
         if credit_line.status == CreditStatus::Suspended {
             clear_reentrancy_guard(&env);
@@ -394,14 +447,28 @@ impl Credit {
         }
         let new_utilized = credit_line
 
+        let new_utilized = credit_line
+
         let updated_utilized = credit_line
+
             .utilized_amount
             .checked_add(amount)
+ 
+            .unwrap_or_else(|| {
+                clear_reentrancy_guard(&env);
+                env.panic_with_error(ContractError::Overflow)
+            });
+
             .expect("overflow");
 
+
+ 
+        if new_utilized > credit_line.credit_limit {
+
         if updated_utilized > credit_line.credit_limit {
+
             clear_reentrancy_guard(&env);
-            panic!("exceeds credit limit");
+            env.panic_with_error(ContractError::OverLimit);
         }
 
         if let Some(token_address) = token_address {
@@ -433,6 +500,7 @@ impl Credit {
     }
 
     /// Repay credit (borrower).
+    /// Errors with ContractError if credit line does not exist, is Closed, or borrower has not authorized.
     /// Reverts if credit line does not exist, is Closed, or borrower has not authorized.
     /// If a liquidity token is configured, transfers that token from the borrower to the
     /// configured liquidity source via allowance + transfer_from.
@@ -444,19 +512,26 @@ impl Credit {
             .storage()
             .persistent()
             .get(&borrower)
+ 
+            .unwrap_or_else(|| {
+                clear_reentrancy_guard(&env);
+                env.panic_with_error(ContractError::CreditLineNotFound)
+            });
+
             .expect("Credit line not found");
 
         if credit_line.borrower != borrower {
             panic!("Borrower mismatch for credit line");
         }
 
+ 
         if credit_line.status == CreditStatus::Closed {
             clear_reentrancy_guard(&env);
-            panic!("credit line is closed");
+            env.panic_with_error(ContractError::CreditLineClosed);
         }
         if amount <= 0 {
             clear_reentrancy_guard(&env);
-            panic!("amount must be positive");
+            env.panic_with_error(ContractError::InvalidAmount);
         }
 
         // Apply at most the outstanding utilized amount to avoid over-charging on overpayment.
@@ -523,6 +598,9 @@ impl Credit {
     }
 
     /// Update risk parameters for an existing credit line (admin only).
+
+
+
     ///
     /// # Arguments
     /// * `borrower` - Borrower whose credit line to update.
@@ -531,11 +609,23 @@ impl Credit {
     /// * `risk_score` - New risk score (0 ..= 100).
     ///
     /// # Errors
+
+    /// * ContractError::NotAdmin if caller is not the contract admin.
+    /// * ContractError::CreditLineNotFound if no credit line exists for the borrower.
+    /// * ContractError::OverLimit if credit_limit < utilized_amount.
+    /// * ContractError::NegativeLimit if credit_limit < 0.
+    /// * ContractError::RateTooHigh if interest_rate_bps reflects a violation.
+    /// * ContractError::ScoreTooHigh if risk_score reflects a violation.
+    ///
+    /// Emits a risk_updated event.
+
+
     /// * Panics if caller is not the contract admin.
     /// * Panics if no credit line exists for the borrower.
     /// * Panics if bounds are violated (e.g. credit_limit < utilized_amount).
     ///
     /// Emits a risk_updated event.
+
     pub fn update_risk_parameters(
         env: Env,
         borrower: Address,
@@ -549,19 +639,19 @@ impl Credit {
             .storage()
             .persistent()
             .get(&borrower)
-            .expect("Credit line not found");
+            .unwrap_or_else(|| env.panic_with_error(ContractError::CreditLineNotFound));
 
         if credit_limit < 0 {
-            panic!("credit_limit must be non-negative");
+            env.panic_with_error(ContractError::NegativeLimit);
         }
         if credit_limit < credit_line.utilized_amount {
-            panic!("credit_limit cannot be less than utilized amount");
+            env.panic_with_error(ContractError::OverLimit);
         }
         if interest_rate_bps > MAX_INTEREST_RATE_BPS {
-            panic!("interest_rate_bps exceeds maximum");
+            env.panic_with_error(ContractError::RateTooHigh);
         }
         if risk_score > MAX_RISK_SCORE {
-            panic!("risk_score exceeds maximum");
+            env.panic_with_error(ContractError::ScoreTooHigh);
         }
 
         credit_line.credit_limit = credit_limit;
@@ -602,7 +692,7 @@ impl Credit {
             .storage()
             .persistent()
             .get(&borrower)
-            .expect("Credit line not found");
+            .unwrap_or_else(|| env.panic_with_error(ContractError::CreditLineNotFound));
 
         if credit_line.status != CreditStatus::Active {
             panic!("Only active credit lines can be suspended");
@@ -643,6 +733,29 @@ impl Credit {
     /// Close a credit line. Callable by admin (force-close) or by borrower when utilization is zero.
     ///
     /// # Arguments
+
+
+
+    /// * `closer` - Address that must have authorized this call. Must be either the contract admin
+    ///   (can close regardless of utilization) or the borrower (can close only when
+    ///   `utilized_amount` is zero).
+    ///
+    /// # Errors
+
+    /// * ContractError::CreditLineNotFound if credit line does not exist.
+    /// * ContractError::Unauthorized if `closer` is not admin/borrower.
+    /// * ContractError::UtilizationNotZero if borrower closes while `utilized_amount != 0`.
+    ///
+    /// Emits a CreditLineClosed event.
+
+    /// * `closer` - Must be either the contract admin or the borrower (only when utilized_amount == 0).
+
+
+    /// * Panics if credit line does not exist, or if `closer` is not admin/borrower, or if
+    ///   borrower closes while `utilized_amount != 0`.
+    ///
+    /// Emits a CreditLineClosed event.
+
     /// * `borrower` - Address of the borrower whose credit line to close.
     ///
     /// # Errors
@@ -659,7 +772,7 @@ impl Credit {
             .storage()
             .persistent()
             .get(&borrower)
-            .expect("Credit line not found");
+            .unwrap_or_else(|| env.panic_with_error(ContractError::CreditLineNotFound));
 
         if credit_line.status == CreditStatus::Closed {
             return;
@@ -669,9 +782,9 @@ impl Credit {
 
         if !allowed {
             if closer == borrower {
-                panic!("cannot close: utilized amount not zero");
+                env.panic_with_error(ContractError::UtilizationNotZero);
             }
-            panic!("unauthorized");
+            env.panic_with_error(ContractError::Unauthorized);
         }
 
         credit_line.status = CreditStatus::Closed;
@@ -714,7 +827,7 @@ impl Credit {
             .storage()
             .persistent()
             .get(&borrower)
-            .expect("Credit line not found");
+            .unwrap_or_else(|| env.panic_with_error(ContractError::CreditLineNotFound));
 
         credit_line.status = CreditStatus::Defaulted;
         env.storage().persistent().set(&borrower, &credit_line);
@@ -1513,6 +1626,222 @@ mod test {
     #[should_panic(expected = "cannot close: utilized amount not zero")]
     fn test_close_credit_line_borrower_rejected_when_utilized_nonzero() {
         let env = Env::default();
+
+        let (_admin, borrower, contract_id) = setup_test(&env);
+
+        // Draw some credit
+        call_contract(&env, &contract_id, || {
+            Credit::draw_credit(env.clone(), borrower.clone(), 500_i128);
+        });
+
+        // Manually set status to Suspended
+        let mut credit_data = get_credit_data(&env, &contract_id, &borrower);
+        credit_data.status = CreditStatus::Suspended;
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&borrower, &credit_data);
+        });
+
+        // Should be able to repay even when suspended
+        call_contract(&env, &contract_id, || {
+            Credit::repay_credit(env.clone(), borrower.clone(), 200_i128);
+        });
+
+        let updated_data = get_credit_data(&env, &contract_id, &borrower);
+        assert_eq!(updated_data.utilized_amount, 300_i128);
+        assert_eq!(updated_data.status, CreditStatus::Suspended); // Status should remain Suspended
+    }
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_repay_credit_invalid_amount_zero() {
+        let env = Env::default();
+        let (_admin, borrower, contract_id) = setup_test(&env);
+
+        call_contract(&env, &contract_id, || {
+            Credit::repay_credit(env.clone(), borrower.clone(), 0_i128);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "amount must be positive")]
+    fn test_repay_credit_invalid_amount_negative() {
+        let env = Env::default();
+        let (_admin, borrower, contract_id) = setup_test(&env);
+
+        let negative_amount: i128 = -100;
+        call_contract(&env, &contract_id, || {
+            Credit::repay_credit(env.clone(), borrower.clone(), negative_amount);
+        });
+    }
+
+    #[test]
+    fn test_full_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+
+        client.open_credit_line(&borrower, &5000_i128, &500_u32, &80_u32);
+        let credit_line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(credit_line.status, CreditStatus::Active);
+
+        client.suspend_credit_line(&borrower);
+        let credit_line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(credit_line.status, CreditStatus::Suspended);
+
+        client.close_credit_line(&borrower, &admin);
+        let credit_line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(credit_line.status, CreditStatus::Closed);
+    }
+
+    #[test]
+    fn test_event_data_integrity() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &2000_i128, &400_u32, &75_u32);
+
+        let credit_line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(credit_line.borrower, borrower);
+        assert_eq!(credit_line.status, CreditStatus::Active);
+        assert_eq!(credit_line.credit_limit, 2000);
+        assert_eq!(credit_line.interest_rate_bps, 400);
+        assert_eq!(credit_line.risk_score, 75);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_suspend_nonexistent_credit_line() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.suspend_credit_line(&borrower);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_close_nonexistent_credit_line() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.close_credit_line(&borrower, &admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_default_nonexistent_credit_line() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.default_credit_line(&borrower);
+    }
+
+    #[test]
+    fn test_multiple_borrowers() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower1 = Address::generate(&env);
+        let borrower2 = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower1, &1000_i128, &300_u32, &70_u32);
+        client.open_credit_line(&borrower2, &2000_i128, &400_u32, &80_u32);
+
+        let credit_line1 = client.get_credit_line(&borrower1).unwrap();
+        let credit_line2 = client.get_credit_line(&borrower2).unwrap();
+
+        assert_eq!(credit_line1.credit_limit, 1000);
+        assert_eq!(credit_line2.credit_limit, 2000);
+        assert_eq!(credit_line1.status, CreditStatus::Active);
+        assert_eq!(credit_line2.status, CreditStatus::Active);
+    }
+
+    #[test]
+    fn test_lifecycle_transitions() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+        assert_eq!(
+            client.get_credit_line(&borrower).unwrap().status,
+            CreditStatus::Active
+        );
+
+        client.default_credit_line(&borrower);
+        assert_eq!(
+            client.get_credit_line(&borrower).unwrap().status,
+            CreditStatus::Defaulted
+        );
+    }
+
+    #[test]
+    fn test_close_credit_line_borrower_when_utilized_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+        client.close_credit_line(&borrower, &borrower);
+
+        let credit_line = client.get_credit_line(&borrower).unwrap();
+        assert_eq!(credit_line.status, CreditStatus::Closed);
+        assert_eq!(credit_line.utilized_amount, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn test_close_credit_line_borrower_rejected_when_utilized_nonzero() {
+        let env = Env::default();
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
@@ -1524,6 +1853,25 @@ mod test {
         client.init(&admin);
         client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
         client.draw_credit(&borrower, &300_i128);
+
+
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let (client, _token, _admin) =
+            setup_contract_with_credit_line(&env, &borrower, 1_000, 1_000);
+        client.draw_credit(&borrower, &300);
+
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+        client.draw_credit(&borrower, &300_i128);
+
 
         client.close_credit_line(&borrower, &borrower);
     }
@@ -1578,6 +1926,13 @@ mod test {
 
     /// Test repayment with zero amount (should panic)
     #[test]
+
+
+    #[should_panic(expected = "Error(Contract, #4)")]
+
+    #[should_panic(expected = "credit line is closed")]
+
+    fn test_draw_credit_rejected_when_closed() {
     #[should_panic(expected = "amount must be positive")]
     fn test_repay_credit_zero_amount() {
         let env = Env::default();
@@ -1598,6 +1953,9 @@ mod test {
 
     /// Test repayment on nonexistent credit line (should panic)
     #[test]
+
+    #[should_panic(expected = "Error(Contract, #4)")]
+
     #[should_panic(expected = "Credit line not found")]
     fn test_repay_credit_nonexistent_line() {
     #[should_panic(expected = "exceeds credit limit")]
@@ -1618,6 +1976,7 @@ mod test {
 
     #[test]
     #[should_panic(expected = "credit line is closed")]
+
     fn test_repay_credit_rejected_when_closed() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1634,6 +1993,13 @@ mod test {
 
     /// Test state consistency after draw and repay cycle
     #[test]
+
+    #[should_panic(expected = "Error(Contract, #1)")]
+
+
+    #[should_panic(expected = "unauthorized")]
+
+    fn test_close_credit_line_unauthorized_closer() {
     fn test_repay_credit_state_consistency() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1834,7 +2200,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Credit line not found")]
+    #[should_panic(expected = "Error(Contract, #3)")]
     fn test_update_risk_parameters_nonexistent_line() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1850,7 +2216,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "credit_limit cannot be less than utilized amount")]
+    #[should_panic(expected = "Error(Contract, #6)")]
     fn test_update_risk_parameters_credit_limit_below_utilized() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1869,7 +2235,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "credit_limit must be non-negative")]
+    #[should_panic(expected = "Error(Contract, #7)")]
     fn test_update_risk_parameters_negative_credit_limit() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1886,7 +2252,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "interest_rate_bps exceeds maximum")]
+    #[should_panic(expected = "Error(Contract, #8)")]
     fn test_update_risk_parameters_interest_rate_exceeds_max() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1903,7 +2269,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "risk_score exceeds maximum")]
+    #[should_panic(expected = "Error(Contract, #9)")]
     fn test_update_risk_parameters_risk_score_exceeds_max() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1991,6 +2357,29 @@ mod test {
     // --- repay_credit: token acceptance (SEP-41) ---
 
     #[test]
+ 
+    #[should_panic(expected = "Error(Contract, #5)")]
+    fn test_repay_credit_rejects_non_positive_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+        let contract_id = env.register(Credit, ());
+        let client = CreditClient::new(&env, &contract_id);
+
+        client.init(&admin);
+        client.open_credit_line(&borrower, &1000_i128, &300_u32, &70_u32);
+        client.repay_credit(&borrower, &0_i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+
+    #[should_panic(expected = "Credit line not found")]
+ 
+    fn test_repay_credit_nonexistent_line() {
     fn test_repay_credit_transfers_token_and_consumes_allowance() {
         let env = Env::default();
         env.mock_all_auths();
