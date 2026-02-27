@@ -11,6 +11,24 @@ pub enum CreditStatus {
     Closed = 3,
 }
 
+#[soroban_sdk::contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum ContractError {
+    Unauthorized = 1,
+    NotAdmin = 2,
+    CreditLineNotFound = 3,
+    CreditLineClosed = 4,
+    InvalidAmount = 5,
+    OverLimit = 6,
+    NegativeLimit = 7,
+    RateTooHigh = 8,
+    ScoreTooHigh = 9,
+    UtilizationNotZero = 10,
+    Reentrancy = 11,
+    Overflow = 12,
+}
+
 /// Stored credit line for a borrower.
 #[contracttype]
 pub struct CreditLineData {
